@@ -105,11 +105,17 @@ You will have **3 minutes** to stand out:
 
 ## Setup
 
+> **You do not need to bring API keys or accounts.** We provide the LLM API
+> key (OpenAI) and any other event-specific credentials at kickoff. Everything
+> below is so you know how to wire what we hand you into your project — not
+> a list of things to sign up for in advance.
+
 ### Prerequisites
 
 - Python 3.10 – 3.14
 - Docker (for Redis)
-- An LLM API key (OpenAI by default; any [supported provider](https://docs.cognee.ai/setup-configuration/llm-providers) works)
+- An LLM API key — **provided by us at kickoff** (you can also bring your own
+  from any [supported provider](https://docs.cognee.ai/setup-configuration/llm-providers))
 
 ### 1. Install Cognee
 
@@ -120,12 +126,15 @@ uv pip install "cognee[redis]"
 
 ### 2. Configure the LLM
 
+We hand out an `LLM_API_KEY` at kickoff — export it in your shell:
+
 ```bash
-export LLM_API_KEY="your-openai-key"
+export LLM_API_KEY="<key-we-give-you-at-the-event>"
 ```
 
-Or copy [`.env.template`](https://github.com/topoteretes/cognee/blob/main/.env.template)
-from the cognee repo to a local `.env` and fill it in.
+Or drop it into a local `.env` based on cognee's [`.env.template`](https://github.com/topoteretes/cognee/blob/main/.env.template).
+Prefer your own provider? Set `LLM_PROVIDER` / `LLM_MODEL` per the
+[provider docs](https://docs.cognee.ai/setup-configuration/llm-providers).
 
 ### 3. Start Redis (session memory)
 
