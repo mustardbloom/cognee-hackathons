@@ -215,13 +215,38 @@ await cognee.serve(
 await cognee.remember("important context")
 ```
 
-## Skills
+## Skills & the Self-Improvement Loop
 
 A **skill** is a small Markdown file that tells the agent how to behave for a
-specific task. Skills live in a folder, get ingested via `cognee.remember(...)`
-with `content_type="skills"`, and can be selected at query time. Feedback from
-each run is recorded as a `SkillRunEntry`, which lets the skill **self-improve**
-over time — the core loop you are building for this hackathon.
+specific task. Skills live in a folder, get ingested into the graph via
+`cognee.remember(..., content_type="skills")`, and are selected at query time.
+After each run you record a `SkillRunEntry` with a score; cognee turns that
+into a **proposal** to rewrite the skill, which you then explicitly **apply**.
+That two-step propose-then-apply cycle is what "self-improvement" means in
+this hackathon.
+
+### The loop
+
+```text
+┌──────────────┐   1. remember(skills)
+│  my_skills/  │ ─────────────────────────────┐
+└──────────────┘                              ▼
+                                       ┌───────────────┐
+2. search(AGENTIC_COMPLETION,          │   Cognee      │
+   skills=[...], session_id=...)  ───▶ │  knowledge    │
+                                       │     graph     │
+3. score the run yourself              └──────┬────────┘
+                                              │
+4. remember(SkillRunEntry, ..., apply=False)  │  proposes
+   ─────────────────────────────────────────▶ │  a SKILL.md
+                                              │  rewrite
+5. improve_skill(proposal_id, apply=True)     │
+   ─────────────────────────────────────────▶ │  applies it
+                                       ┌──────▼────────┐
+                                       │  improved     │
+                                       │   SKILL.md    │
+                                       └───────────────┘
+```
 
 ### Folder layout
 
@@ -245,57 +270,113 @@ Read the diff carefully. Report concrete issues first, with file paths and
 line references when available.
 ```
 
-A starter version of this skill is included at
-[`my_skills/code-review/SKILL.md`](./my_skills/code-review/SKILL.md) — copy it,
-fork it, or replace it with your own.
+A starter version is at
+[`my_skills/code-review/SKILL.md`](./my_skills/code-review/SKILL.md) — copy
+it, fork it, or replace it with your own. Real wikis will usually have
+several skills (one to extract, one to evaluate, one to write feedback, ...).
 
-### Run a skill from Python
+### Run the loop from Python
 
 ```python
 import asyncio
+from uuid import UUID
+
 import cognee
 from cognee import SearchType
 from cognee.memory import SkillRunEntry
+from cognee.modules.engine.operations.setup import setup
+from cognee.modules.memify.skill_improvement import improve_skill
+from cognee.modules.pipelines.layers.resolve_authorized_user_datasets import (
+    resolve_authorized_user_datasets,
+)
+
+DATASET = "my-wiki"
+SESSION = "wiki-session-1"
 
 
 async def main():
-    await cognee.remember(
+    # Fresh slate — drop these two prune calls if you want to keep prior runs.
+    await cognee.prune.prune_data()
+    await cognee.prune.prune_system(metadata=True)
+    await setup()
+
+    # 1. Ingest skills into the graph.
+    remembered = await cognee.remember(
         "./my_skills",
-        dataset_name="project",
+        dataset_name=DATASET,
         content_type="skills",
     )
+    dataset_id = UUID(remembered.dataset_id)
+    user, datasets = await resolve_authorized_user_datasets(dataset_id)
+    dataset = datasets[0]
 
+    # 2. Run the agent against the skills. session_id routes working
+    #    memory to Redis. Ask the agent to return a JSON score in its answer.
     answer = await cognee.search(
-        "Review the current auth changes",
+        "Review the current auth changes. Return JSON with a score 0..1.",
         query_type=SearchType.AGENTIC_COMPLETION,
-        datasets="project",
+        datasets=DATASET,
         skills=["code-review"],
+        max_iter=6,
+        session_id=SESSION,
     )
-    print(answer)
 
+    # 3. Score the run. In real life: parse `answer`, run an eval, etc.
+    score = 0.3
+    skill_to_improve = "code-review"
+
+    # 4. Record feedback. apply=False -> propose a rewrite, don't change the
+    #    skill yet. score_threshold sets when a proposal is generated.
     proposal_result = await cognee.remember(
         SkillRunEntry(
-            selected_skill_id="code-review",
+            selected_skill_id=skill_to_improve,
             task_text="Review the current auth changes",
-            result_summary="The review missed a dataset boundary bug.",
-            success_score=0.2,
-            feedback=-0.6,
-            error_type="missed_regression",
+            result_summary="Review missed a dataset boundary bug.",
+            success_score=score,
+            feedback=-1.0 if score < 0.7 else 1.0,
         ),
-        dataset_name="project",
+        dataset_name=DATASET,
+        session_id=SESSION,
         skill_improvement={
-            "skill_name": "code-review",
+            "skill_name": skill_to_improve,
             "apply": False,
+            "score_threshold": 0.9,
         },
     )
-    print(proposal_result.items)
+
+    # 5. Apply the proposal explicitly.
+    proposal_id = next(
+        item["proposal_id"]
+        for item in proposal_result.items
+        if item.get("kind") == "skill_improvement_proposal"
+    )
+    await improve_skill(
+        skill_to_improve,
+        dataset=dataset,
+        user=user,
+        proposal_id=proposal_id,
+        apply=True,
+    )
 
 
 asyncio.run(main())
 ```
 
-`skill_improvement={"apply": False}` returns the proposed `SKILL.md` diff
-without writing it. Flip to `True` once you trust the loop.
+What the knobs do:
+
+- **`session_id`** — routes working memory for this run to Redis. Different
+  sessions stay isolated; distillation into the graph happens when you call
+  `cognee.remember(...)` without a `session_id` (or via the background sync).
+- **`max_iter`** — caps how many agent reasoning steps run before returning.
+- **`score_threshold`** (in `skill_improvement`) — only generate a proposal
+  when the run score falls *below* this value. Raise it to be aggressive
+  about improvement; lower it to only react to clear failures.
+- **`apply=False`** — propose without rewriting. Inspect the diff, then call
+  `improve_skill(..., apply=True)` to actually update the skill.
+
+A full multi-skill version of this loop (three cooperating skills, JSON
+parsing, before/after skill bodies) lives in the cognee repo at
+[`examples/demos/skill_feedback_loop/skill_feedback_loop_demo.py`](https://github.com/topoteretes/cognee/tree/main/examples/demos/skill_feedback_loop).
 
 ## Other Ways to Run Cognee
 
